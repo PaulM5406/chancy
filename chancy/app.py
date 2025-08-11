@@ -14,6 +14,7 @@ from psycopg_pool import AsyncConnectionPool, ConnectionPool
 from chancy.migrate import Migrator
 from chancy.queue import Queue
 from chancy.job import Reference, Job, QueuedJob, IsAJob
+from chancy.rate_limit import RateLimit
 from chancy.plugin import Plugin
 from chancy.utils import (
     chancy_uuid,
@@ -451,8 +452,7 @@ class Chancy:
                 "executor": queue.executor,
                 "executor_options": Json(queue.executor_options),
                 "polling_interval": queue.polling_interval,
-                "rate_limit": queue.rate_limit,
-                "rate_limit_window": queue.rate_limit_window,
+                "rate_limit_key": queue.rate_limit_key,
                 "resume_at": queue.resume_at,
             },
         )
@@ -491,20 +491,13 @@ class Chancy:
                 "executor": queue.executor,
                 "executor_options": Json(queue.executor_options),
                 "polling_interval": queue.polling_interval,
-                "rate_limit": queue.rate_limit,
-                "rate_limit_window": queue.rate_limit_window,
+                "rate_limit_key": queue.rate_limit_key,
                 "resume_at": queue.resume_at,
             },
         )
 
         result = cursor.fetchone()
-        return Queue(
-            **{
-                **result,
-                "name": queue.name,
-                "tags": set(result["tags"]),
-            }
-        )
+        return Queue.unpack(result)
 
     @_ensure_pool_is_open
     async def push(self, job: Job | IsAJob[..., Any]) -> Reference:
@@ -1003,6 +996,191 @@ class Chancy:
                         cursor, "job.cancelled", {"j": ref.identifier}
                     )
 
+    @_ensure_pool_is_open
+    async def declare_rate_limit(
+        self, rate_limit: RateLimit, *, upsert: bool = False
+    ) -> RateLimit:
+        """
+        Declare a rate limit configuration in the database.
+
+        This will create a new rate limit configuration in the database with the provided
+        settings. If the rate limit already exists, no changes will be made unless the
+        ``upsert`` parameter is set to ``True``.
+
+        .. code-block:: python
+
+            async with Chancy("postgresql://localhost/postgres") as chancy:
+                await chancy.declare_rate_limit(
+                    RateLimit(
+                        rate_limit_key="amazon_api",
+                        rate_limit=30,
+                        rate_limit_window=60
+                    )
+                )
+
+        :param rate_limit: The rate limit configuration to declare.
+        :param upsert: If `True`, the rate limit will be updated if it already
+            exists. Defaults to `False`.
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cursor:
+                result = await self.declare_rate_limit_ex(
+                    cursor, rate_limit, upsert=upsert
+                )
+                return result
+
+    async def declare_rate_limit_ex(
+        self,
+        cursor: AsyncCursor[DictRow] | None,
+        rate_limit: RateLimit,
+        *,
+        upsert: bool = False,
+    ) -> RateLimit:
+        """
+        Declare a rate limit configuration in the database using a specific cursor.
+
+        :param cursor: The cursor to use for the operation.
+        :param rate_limit: The rate limit configuration to declare.
+        :param upsert: If `True`, the rate limit will be updated if it already
+            exists. Defaults to `False`.
+        """
+        await cursor.execute(
+            self._declare_rate_limit_sql(upsert),
+            {
+                "rate_limit_key": rate_limit.rate_limit_key,
+                "rate_limit": rate_limit.rate_limit,
+                "rate_limit_window": rate_limit.rate_limit_window,
+            },
+        )
+
+        result = await cursor.fetchone()
+        return RateLimit.unpack(result)
+
+    @_ensure_pool_is_open
+    async def get_all_rate_limits(self) -> list[RateLimit]:
+        """
+        Get all rate limit configurations from the database.
+
+        :return: A list of all rate limit configurations.
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(self._get_all_rate_limits_sql())
+                results = await cursor.fetchall()
+                return [RateLimit.unpack(result) for result in results]
+
+    @_ensure_pool_is_open
+    async def get_rate_limit(self, rate_limit_key: str) -> RateLimit | None:
+        """
+        Get a specific rate limit configuration by key.
+
+        :param rate_limit_key: The rate limit key to look up.
+        :return: The rate limit configuration, or None if not found.
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(
+                    self._get_rate_limit_sql(),
+                    (rate_limit_key,),
+                )
+                result = await cursor.fetchone()
+                return RateLimit.unpack(result) if result else None
+
+    def _declare_rate_limit_sql(self, upsert: bool):
+        if upsert:
+            action = sql.SQL(
+                """
+                UPDATE SET
+                    rate_limit = EXCLUDED.rate_limit,
+                    rate_limit_window = EXCLUDED.rate_limit_window
+                """
+            )
+        else:
+            action = sql.SQL("NOTHING")
+
+        return sql.SQL(
+            """
+            INSERT INTO {rate_limit_configs} (
+                rate_limit_key,
+                rate_limit,
+                rate_limit_window
+            ) VALUES (
+                %(rate_limit_key)s,
+                %(rate_limit)s,
+                %(rate_limit_window)s
+            )
+            ON CONFLICT (rate_limit_key) DO
+                {action}
+            RETURNING 
+                rate_limit_key,
+                rate_limit,
+                rate_limit_window
+            """
+        ).format(
+            rate_limit_configs=sql.Identifier(
+                f"{self.prefix}rate_limit_configs"
+            ),
+            action=action,
+        )
+
+    def _get_all_rate_limits_sql(self):
+        return sql.SQL(
+            "SELECT * FROM {rate_limit_configs} ORDER BY rate_limit_key"
+        ).format(
+            rate_limit_configs=sql.Identifier(
+                f"{self.prefix}rate_limit_configs"
+            )
+        )
+
+    def _get_rate_limit_sql(self):
+        return sql.SQL(
+            "SELECT * FROM {rate_limit_configs} WHERE rate_limit_key = %s"
+        ).format(
+            rate_limit_configs=sql.Identifier(
+                f"{self.prefix}rate_limit_configs"
+            )
+        )
+
+    def _delete_rate_limit_data_sql(self):
+        return sql.SQL(
+            "DELETE FROM {global_rate_limits} WHERE rate_limit_key = %s"
+        ).format(
+            global_rate_limits=sql.Identifier(
+                f"{self.prefix}global_rate_limits"
+            )
+        )
+
+    def _delete_rate_limit_config_sql(self):
+        return sql.SQL(
+            "DELETE FROM {rate_limit_configs} WHERE rate_limit_key = %s"
+        ).format(
+            rate_limit_configs=sql.Identifier(
+                f"{self.prefix}rate_limit_configs"
+            )
+        )
+
+    @_ensure_pool_is_open
+    async def delete_rate_limit(self, rate_limit_key: str):
+        """
+        Delete a rate limit configuration.
+
+        :param rate_limit_key: The rate limit key to delete.
+        :return: True if the rate limit was deleted, False if it didn't exist.
+        """
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cursor:
+                # First delete any rate limit data
+                await cursor.execute(
+                    self._delete_rate_limit_data_sql(),
+                    (rate_limit_key,),
+                )
+
+                # Then delete the configuration
+                await cursor.execute(
+                    self._delete_rate_limit_config_sql(),
+                    (rate_limit_key,),
+                )
+
     def _get_all_workers_sql(self):
         return sql.SQL(
             """
@@ -1055,7 +1233,9 @@ class Chancy:
                     priority,
                     max_attempts,
                     scheduled_at,
-                    unique_key
+                    unique_key,
+                    rate_limit_key,
+                    rate_limit_partition_key
                 )
             VALUES (
                 %(id)s,
@@ -1067,7 +1247,9 @@ class Chancy:
                 %(priority)s,
                 %(max_attempts)s,
                 %(scheduled_at)s,
-                %(unique_key)s
+                %(unique_key)s,
+                %(rate_limit_key)s,
+                %(rate_limit_partition_key)s
             )
             ON CONFLICT (unique_key)
             WHERE
@@ -1109,8 +1291,7 @@ class Chancy:
                     executor = EXCLUDED.executor,
                     executor_options = EXCLUDED.executor_options,
                     polling_interval = EXCLUDED.polling_interval,
-                    rate_limit = EXCLUDED.rate_limit,
-                    rate_limit_window = EXCLUDED.rate_limit_window,
+                    rate_limit_key = EXCLUDED.rate_limit_key,
                     resume_at = EXCLUDED.resume_at
                 """
             )
@@ -1125,8 +1306,7 @@ class Chancy:
                 executor,
                 executor_options,
                 polling_interval,
-                rate_limit,
-                rate_limit_window,
+                rate_limit_key,
                 resume_at
             ) VALUES (
                 %(name)s,
@@ -1136,8 +1316,7 @@ class Chancy:
                 %(executor)s,
                 %(executor_options)s,
                 %(polling_interval)s,
-                %(rate_limit)s,
-                %(rate_limit_window)s,
+                %(rate_limit_key)s,
                 %(resume_at)s
             )
             ON CONFLICT (name) DO
@@ -1149,8 +1328,7 @@ class Chancy:
                 polling_interval,
                 executor,
                 executor_options,
-                rate_limit,
-                rate_limit_window,
+                rate_limit_key,
                 resume_at
             """
         ).format(
@@ -1180,6 +1358,8 @@ class Chancy:
             "max_attempts": job.max_attempts,
             "scheduled_at": job.scheduled_at,
             "unique_key": job.unique_key,
+            "rate_limit_key": job.rate_limit_key,
+            "rate_limit_partition_key": job.rate_limit_partition_key,
         }
 
 

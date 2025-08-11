@@ -36,20 +36,22 @@ class Queue:
             async with Worker(chancy, tags={"reporting"}) as worker:
                 await worker.wait_for_shutdown()
 
-    Queues can have a global rate limit applied to them, which will be enforced
-    across all workers processing jobs from the queue:
+    Queues can use global rate limiting by setting a rate_limit_key:
 
     .. code-block:: python
 
+        from chancy import Chancy, Queue, RateLimit
+
         async with Chancy("postgresql://localhost/postgres") as chancy:
+            await chancy.declare_rate_limit(
+                RateLimit(rate_limit_key="amazon_api", rate_limit=10, rate_limit_window=60)
+            )
             await chancy.declare(
-                Queue(name="default", rate_limit=10, rate_limit_window=60)
+                Queue(name="default", rate_limit_key="amazon_api")
             )
 
-    This will limit the queue to processing 10 jobs per minute across all
-    workers. If the rate limit is exceeded, jobs will be skipped until the
-    rate limit window has passed. Combined with the AsyncExecutor, this can be
-    a very easy way to work with external APIs.
+    This will limit jobs from this queue to the global rate limit defined
+    for "amazon_api". Rate limits can be shared across queues and jobs.
 
     .. note::
 
@@ -83,10 +85,15 @@ class Queue:
     executor_options: dict = dataclasses.field(default_factory=dict)
     #: The number of seconds to wait between polling the queue for new jobs.
     polling_interval: int = 5
-    #: An optional global rate limit to apply to this queue. All workers
-    #: processing jobs from this queue will be subject to this limit.
+    #: An optional rate limit key that allows sharing rate limits across
+    #: queues and jobs. If set, jobs in this queue will be subject to the
+    #: global rate limit defined for this key.
+    rate_limit_key: str = ""
+    #: The rate limit value (max operations per window). Only set when rate_limit_key is set.
+    #: This is pre-loaded from the rate_limit_configs table for efficiency.
     rate_limit: int | None = None
-    #: The period of time over which the rate limit applies (in seconds).
+    #: The rate limit window in seconds. Only set when rate_limit_key is set.
+    #: This is pre-loaded from the rate_limit_configs table for efficiency.
     rate_limit_window: int | None = None
     #: If set, the time at which the queue should automatically reset to the
     #: active state. This can be used to implement a "pause for X seconds"
@@ -106,6 +113,7 @@ class Queue:
             executor=data["executor"],
             executor_options=data["executor_options"],
             polling_interval=data["polling_interval"],
+            rate_limit_key=data["rate_limit_key"],
             rate_limit=data.get("rate_limit"),
             rate_limit_window=data.get("rate_limit_window"),
             resume_at=data.get("resume_at"),
@@ -124,6 +132,7 @@ class Queue:
             "executor": self.executor,
             "executor_options": self.executor_options,
             "polling_interval": self.polling_interval,
+            "rate_limit_key": self.rate_limit_key,
             "rate_limit": self.rate_limit,
             "rate_limit_window": self.rate_limit_window,
             "resume_at": self.resume_at,

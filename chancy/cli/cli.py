@@ -30,10 +30,11 @@ def cli(ctx: click.Context, app: str):
 
 
 def main():
-    from chancy.cli import misc, queue, worker
+    from chancy.cli import misc, queue, rate_limit, worker
 
     cli.add_command(misc.misc_group)
     cli.add_command(queue.queue_group)
+    cli.add_command(rate_limit.rate_limit_group)
     cli.add_command(worker.worker_group)
 
     cli()

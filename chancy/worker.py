@@ -120,6 +120,8 @@ class Worker:
                                        should be processing.
     :param shutdown_timeout: The number of seconds to wait for a clean shutdown
                                 before forcing the worker to stop.
+    :param rate_limit_reschedule_delay: The number of seconds to delay 
+                                       rate-limited jobs before retrying.
     :param tags: Extra tags to associate with the worker.
     :param register_signal_handlers: Whether to register signal handlers.
     """
@@ -133,6 +135,7 @@ class Worker:
         heartbeat_timeout: int = 90,
         queue_change_poll_interval: int = 10,
         shutdown_timeout: int = 30,
+        rate_limit_reschedule_delay: float = 0.2,
         tags: set[str] | None = None,
         register_signal_handlers: bool = True,
     ):
@@ -148,6 +151,8 @@ class Worker:
         #: The number of seconds to wait for a clean shutdown before forcing
         #: the worker to stop.
         self.shutdown_timeout = shutdown_timeout
+        #: The number of seconds to delay rate-limited jobs before retrying.
+        self.rate_limit_reschedule_delay = rate_limit_reschedule_delay
         #: The number of seconds between sending outgoing updates to the
         #: database.
         self.send_outgoing_interval = 1
@@ -282,20 +287,23 @@ class Worker:
                         sql.SQL(
                             """
                             SELECT 
-                                name,
-                                concurrency,
-                                tags,
-                                state,
-                                executor,
-                                executor_options,
-                                polling_interval,
-                                rate_limit,
-                                rate_limit_window,
-                                resume_at
-                            FROM {queues}
+                                q.name,
+                                q.concurrency,
+                                q.tags,
+                                q.state,
+                                q.executor,
+                                q.executor_options,
+                                q.polling_interval,
+                                q.rate_limit_key,
+                                q.resume_at,
+                                rl.rate_limit,
+                                rl.rate_limit_window
+                            FROM {queues} q
+                            LEFT JOIN {rate_limit_configs} rl ON q.rate_limit_key = rl.rate_limit_key
                         """
                         ).format(
-                            queues=sql.Identifier(f"{self.chancy.prefix}queues")
+                            queues=sql.Identifier(f"{self.chancy.prefix}queues"),
+                            rate_limit_configs=sql.Identifier(f"{self.chancy.prefix}rate_limit_configs")
                         ),
                     )
                     # Tags in the database is a list of regexes, while the tags
@@ -691,117 +699,96 @@ class Worker:
         :param conn: The database connection to use.
         :param up_to: The maximum number of jobs to fetch.
         """
-        jobs_table = sql.Identifier(f"{self.chancy.prefix}jobs")
-        rate_limits_table = sql.Identifier(
-            f"{self.chancy.prefix}queue_rate_limits"
-        )
-
+        current_time = int(time.time())
+        
         async with conn.cursor(row_factory=dict_row) as cursor:
-            async with conn.transaction():
-                # If the queue is configured to use a rate limit, we need to
-                # check if there's any remaining capacity in the current
-                # window.
-                if queue.rate_limit:
-                    now = int(time.time())
-                    window_start = now - (now % queue.rate_limit_window)
-
+            reserved_jobs = up_to
+            
+            # Phase 1: Reserve queue rate limit capacity (separate transaction) 
+            # Only if queue has rate limiting configured
+            if queue.rate_limit_key and queue.rate_limit and queue.rate_limit_window:
+                async with conn.transaction():
                     await cursor.execute(
                         sql.SQL(
                             """
-                            INSERT INTO {rate_limits_table} (
-                                queue,
-                                window_start,
-                                count
-                            )
-                            VALUES (%s, %s, 0)
-                            ON CONFLICT (queue) DO UPDATE
-                            SET 
-                                count = CASE
-                                    WHEN {rate_limits_table}.window_start
-                                        = EXCLUDED.window_start
-                                            THEN {rate_limits_table}.count
-                                    ELSE 0
-                                END,
-                                window_start = EXCLUDED.window_start
-                            RETURNING count
+                            SELECT {reserve_func}(
+                                %(rate_limit_key)s,
+                                %(rate_limit)s,
+                                %(rate_limit_window)s,
+                                %(max_jobs)s,
+                                %(current_time)s
+                            ) as reserved_jobs
                             """
-                        ).format(rate_limits_table=rate_limits_table),
-                        (queue.name, window_start),
+                        ).format(reserve_func=sql.Identifier(f"{self.chancy.prefix}reserve_queue_rate_limit")),
+                        {
+                            "rate_limit_key": queue.rate_limit_key,
+                            "rate_limit": queue.rate_limit,
+                            "rate_limit_window": queue.rate_limit_window,
+                            "max_jobs": up_to,
+                            "current_time": current_time
+                        }
                     )
-
+                    
                     result = await cursor.fetchone()
-                    current_count = result["count"]
-
-                    # If we've hit the rate limit, return early with no jobs
-                    # fetched.
-                    if current_count >= queue.rate_limit:
+                    reserved_jobs = result["reserved_jobs"]
+                    
+                    # If no capacity available, return empty
+                    if reserved_jobs == 0:
                         return []
 
-                    # Adjust up_to based on remaining rate limit
-                    up_to = min(up_to, queue.rate_limit - current_count)
-
+            # Phase 2: Select and process jobs with job-level rate limiting (separate transaction)
+            async with conn.transaction():
                 await cursor.execute(
                     sql.SQL(
                         """
-                        WITH selected_jobs AS (
-                            SELECT
-                                id
-                            FROM
-                                {jobs}
-                            WHERE
-                                queue = %(queue)s
-                            AND
-                                (state = 'pending' OR state = 'retrying')
-                            AND
-                                attempts < max_attempts
-                            AND
-                                (scheduled_at IS NULL OR scheduled_at <= NOW())
-                            ORDER BY
-                                priority DESC,
-                                id ASC
-                            LIMIT
-                                %(maximum_jobs_to_fetch)s
-                            FOR UPDATE OF {jobs} SKIP LOCKED
+                        SELECT * FROM {select_func}(
+                            %(queue_name)s,
+                            %(max_jobs)s,
+                            %(worker_id)s,
+                            %(current_time)s,
+                            %(reschedule_delay)s
                         )
-                        UPDATE
-                            {jobs}
-                        SET
-                            started_at = NOW(),
-                            state = 'running',
-                            taken_by = %(worker_id)s
-                        FROM
-                            selected_jobs
-                        WHERE
-                            {jobs}.id = selected_jobs.id
-                        RETURNING {jobs}.*
                         """
-                    ).format(
-                        jobs=jobs_table,
-                    ),
+                    ).format(select_func=sql.Identifier(f"{self.chancy.prefix}select_jobs_with_rate_limits")),
                     {
-                        "queue": queue.name,
-                        "maximum_jobs_to_fetch": up_to,
+                        "queue_name": queue.name,
+                        "max_jobs": reserved_jobs,
                         "worker_id": self.worker_id,
-                    },
+                        "current_time": current_time,
+                        "reschedule_delay": self.rate_limit_reschedule_delay
+                    }
                 )
-
+                
                 records = await cursor.fetchall()
+                actual_jobs = len(records)
+                
+                # Wake the queue only if we got fewer jobs than reserved (indicating rate limiting)
+                # and we actually got some jobs (meaning there are jobs in the queue, just rate-limited)
+                if actual_jobs < reserved_jobs and actual_jobs > 0:
+                    self.queue_wake_events[queue.name].set()
 
-                # If a rate limit is configured, and we ended up fetching jobs,
-                # we need to increment the rate limit counter.
-                if queue.rate_limit and records:
+            # Phase 3: Adjust queue rate limit based on actual usage (separate transaction)
+            # Only needed if we actually reserved queue capacity in Phase 1
+            if queue.rate_limit_key and queue.rate_limit and queue.rate_limit_window:
+                async with conn.transaction():
                     await cursor.execute(
                         sql.SQL(
                             """
-                            UPDATE {rate_limits_table}
-                            SET count = count + %s
-                            WHERE queue = %s
+                            SELECT {adjust_func}(
+                                %(queue_rate_limit_key)s,
+                                %(reserved_jobs)s,
+                                %(actual_jobs)s
+                            )
                             """
-                        ).format(rate_limits_table=rate_limits_table),
-                        (len(records), queue.name),
+                        ).format(adjust_func=sql.Identifier(f"{self.chancy.prefix}adjust_queue_rate_limit")),
+                        {
+                            "queue_rate_limit_key": queue.rate_limit_key,
+                            "reserved_jobs": reserved_jobs,
+                            "actual_jobs": actual_jobs
+                        }
                     )
 
-                return [QueuedJob.unpack(record) for record in records]
+            return [QueuedJob.unpack(record) for record in records]
 
     async def on_signal(self, signum: int):
         """

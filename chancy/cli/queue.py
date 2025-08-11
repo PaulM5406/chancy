@@ -116,13 +116,9 @@ async def list_queues(ctx: click.Context):
     help="The executor to use.",
 )
 @click.option(
-    "--rate-limit", "-r", type=int, help="The global queue rate limit."
-)
-@click.option(
-    "--rate-limit-window",
-    "-w",
-    type=int,
-    help="The global queue rate limit window.",
+    "--rate-limit-key",
+    "-r",
+    help="The global rate limit key to apply to this queue.",
 )
 @click.option(
     "--polling-interval",
@@ -137,6 +133,12 @@ async def list_queues(ctx: click.Context):
     help="Extra tags to apply to the queue.",
     multiple=True,
 )
+@click.option(
+    "--upsert",
+    "-u",
+    is_flag=True,
+    help="Update the queue configuration if it already exists.",
+)
 @click.pass_context
 @run_async_command
 async def declare_queue(
@@ -144,13 +146,13 @@ async def declare_queue(
     name: str,
     concurrency: int | None,
     executor: str | None,
-    rate_limit: int | None,
-    rate_limit_window: int | None,
+    rate_limit_key: str | None,
     polling_interval: int | None,
     tags: list[str] | None,
+    upsert: bool,
 ):
     """
-    Declare a new queue.
+    Declare a queue or update an existing one..
     """
     chancy: Chancy = ctx.obj["app"]
 
@@ -160,11 +162,11 @@ async def declare_queue(
                 name,
                 concurrency=concurrency,
                 executor=executor,
-                rate_limit=rate_limit,
-                rate_limit_window=rate_limit_window,
+                rate_limit_key=rate_limit_key,
                 polling_interval=polling_interval,
                 tags=set(tags) if tags else {r".*"},
-            )
+            ),
+            upsert=upsert,
         )
 
 

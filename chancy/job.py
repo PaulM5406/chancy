@@ -112,6 +112,14 @@ class Job:
     #: Arbitrary metadata associated with this job instance. Plugins can use
     #: this to store additional information during the execution of a job.
     meta: dict[str, Any] = dataclasses.field(default_factory=dict)
+    #: An optional rate limit key that allows sharing rate limits across
+    #: jobs and queues. If set, this job will be subject to the global
+    #: rate limit defined for this key.
+    rate_limit_key: str = ""
+    #: An optional partition key that allows partitioning rate limits.
+    #: When used with rate_limit_key, each distinct partition value will
+    #: have its own rate limit counter.
+    rate_limit_partition_key: str = ""
 
     @classmethod
     def from_func(cls, func, **kwargs):
@@ -152,6 +160,14 @@ class Job:
     def with_meta(self, meta: dict[str, Any]) -> "Job":
         return dataclasses.replace(self, meta=meta)
 
+    def with_rate_limit(self, rate_limit_key: str) -> "Job":
+        return dataclasses.replace(self, rate_limit_key=rate_limit_key)
+
+    def with_rate_limit_partition(self, rate_limit_partition_key: str) -> "Job":
+        return dataclasses.replace(
+            self, rate_limit_partition_key=rate_limit_partition_key
+        )
+
     def pack(self) -> dict:
         """
         Pack the job into a dictionary that can be serialized and used to
@@ -167,6 +183,8 @@ class Job:
             "u": self.unique_key,
             "q": self.queue,
             "m": self.meta,
+            "rk": self.rate_limit_key,
+            "rp": self.rate_limit_partition_key,
         }
 
     @classmethod
@@ -184,6 +202,8 @@ class Job:
             unique_key=data["u"],
             queue=data["q"],
             meta=data["m"],
+            rate_limit_key=data["rk"],
+            rate_limit_partition_key=data["rp"],
         )
 
 
@@ -236,6 +256,8 @@ class QueuedJob(Job):
             errors=data["errors"],
             limits=[Limit.deserialize(limit) for limit in data["limits"]],
             meta=data["meta"],
+            rate_limit_key=data["rate_limit_key"],
+            rate_limit_partition_key=data["rate_limit_partition_key"],
         )
 
 
