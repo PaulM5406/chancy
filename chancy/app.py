@@ -674,22 +674,27 @@ class Chancy:
         :param jobs: The jobs to push onto the queue.
         :return: A list of references to the jobs in the queue.
         """
-        references = []
-        for job in jobs:
-            if callable(job):
-                job = job.job
-            if job.concurrency_key:
-                await cursor.execute(
-                    self._push_concurrency_config_sql(),
-                    self._get_concurrency_params(job)
-                )
-                
-            await cursor.execute(
-                self._push_job_sql(),
-                self._get_job_params(job),
+        # Insert concurrency configurations
+        concurrency_params = self._concurrency_params_iterator(jobs)
+        if concurrency_params:
+            await cursor.executemany(
+                self._push_concurrency_config_sql(),
+                concurrency_params,
             )
+
+        # Insert jobs
+        await cursor.executemany(
+            self._push_job_sql(),
+            self._job_params_iterator(jobs),
+            returning=True,
+        )
+        references = []
+        while True:
             record = await cursor.fetchone()
-            references.append(Reference(record["id"]))
+            if record:
+                references.append(Reference(record["id"]))
+            elif not cursor.nextset():
+                break
 
         if self.notifications:
             for queue in set(
@@ -718,24 +723,31 @@ class Chancy:
         :param jobs: The jobs to push onto the queue.
         :return: A list of references to the jobs in the queue.
         """
-        references = []
-        for job in jobs:
-            if callable(job):
-                job = job.job
-            if job.concurrency_key:
-                cursor.execute(
-                    self._push_concurrency_config_sql(),
-                    self._get_concurrency_params(job)
-                )
-                
-            cursor.execute(
-                self._push_job_sql(),
-                self._get_job_params(job),
+        # Insert concurrency configurations
+        concurrency_params = self._concurrency_params_iterator(jobs)
+        if concurrency_params:
+            cursor.executemany(
+                self._push_concurrency_config_sql(),
+                concurrency_params,
             )
-            record = cursor.fetchone()
-            references.append(Reference(record["id"]))
 
-        for queue in set(job.queue for job in jobs):
+        # Insert jobs
+        cursor.executemany(
+            self._push_job_sql(),
+            self._job_params_iterator(jobs),
+            returning=True,
+        )
+        references = []
+        while True:
+            record = cursor.fetchone()
+            if record:
+                references.append(Reference(record["id"]))
+            elif not cursor.nextset():
+                break
+
+        for queue in set(
+            job.queue if isinstance(job, Job) else job.job.queue for job in jobs
+        ):
             self.sync_notify(cursor, "queue.pushed", {"q": queue})
 
         return references
@@ -1493,20 +1505,22 @@ class Chancy:
                 updated_at = NOW()
             """
         ).format(
-            concurrency_configs=sql.Identifier(f"{self.prefix}concurrency_configs")
+            concurrency_configs=sql.Identifier(
+                f"{self.prefix}concurrency_configs"
+            )
         )
 
     @staticmethod
     def _get_concurrency_params(job: Job) -> tuple:
         """
         Get the parameters for storing concurrency configuration.
-        
+
         :param job: The job containing concurrency configuration.
         :return: A tuple of parameters for the concurrency config.
         """
         return (
-            job.evaluate_concurrency_key(),
-            job.concurrency_max
+            job.evaluate_concurrency_key(),  # prefixed concurrency key
+            job.concurrency_rule.max if job.concurrency_rule else None,
         )
 
     @staticmethod
@@ -1531,9 +1545,35 @@ class Chancy:
             "concurrency_key": job.evaluate_concurrency_key(),
         }
 
+    def _concurrency_params_iterator(
+        self, jobs: list[Job | IsAJob[..., Any]]
+    ) -> Iterator[tuple] | None:
+        """
+        Collect and deduplicate concurrency configurations from jobs.
+        Create an iterator over the unique concurrency parameters.
+        """
+        concurrency_configs = {}
 
-from chancy.plugins.pruner import Pruner  # noqa: E402
-from chancy.plugins.recovery import Recovery  # noqa: E402
+        for job in jobs:
+            if callable(job):
+                job = job.job
+            if job.concurrency_rule:
+                params = self._get_concurrency_params(job)
+                concurrency_configs[params[0]] = params
+
+        if concurrency_configs:
+            yield from concurrency_configs.values()
+
+    def _job_params_iterator(self, jobs: list[Job | IsAJob[..., Any]]):
+        """Create iterator for job parameters."""
+        for job in jobs:
+            if callable(job):
+                job = job.job
+            yield self._get_job_params(job)
+
+
 from chancy.plugins.leadership import Leadership  # noqa: E402
 from chancy.plugins.metrics import Metrics  # noqa: E402
+from chancy.plugins.pruner import Pruner  # noqa: E402
+from chancy.plugins.recovery import Recovery  # noqa: E402
 from chancy.plugins.workflow import WorkflowPlugin  # noqa: E402
