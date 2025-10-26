@@ -14,6 +14,11 @@ Changelog
   dependencies or invalid dependencies cannot be created.
 - Test against PostgreSQL 18 and Python 3.14.
 - The metrics plugin now tracks metrics on its own operations.
+- Added `Chancy.purge_jobs()` and `Chancy.retry_jobs()` to bulk purge or
+  retry specific jobs by reference.
+- Added `_ex` versions of `purge_jobs`, `retry_jobs`, `pause_queue`,
+  `resume_queue`, `delete_queue`, and `cancel_job` to allow passing in a
+  cursor for transactional operations.
 
 🐛 Fixes
 
