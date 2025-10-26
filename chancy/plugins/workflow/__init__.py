@@ -488,7 +488,7 @@ class WorkflowPlugin(Plugin):
                             'dependencies', ws.dependencies,
                             'state', j.state,
                             'job_id', ws.job_id
-                        )
+                        ) order by ws.step_id
                     ), '[]'::json) as steps
                 FROM {workflows} w
                 LEFT JOIN {workflow_steps} ws ON w.id = ws.workflow_id

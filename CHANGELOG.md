@@ -4,6 +4,11 @@ Changelog
 0.25.1
 ------
 
+✨ Improvements
+
+- Ensure `fetch_workflows_ex` always has guaranteed deterministic ordering of
+  the returned workflow steps.
+
 🐛 Fixes
 
 - Fix a workflow's on_single_step_completed potentially running after the
