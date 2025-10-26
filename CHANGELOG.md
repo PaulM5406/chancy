@@ -13,6 +13,7 @@ Changelog
 - Workflow's now validate before pushing, ensuring workflows with circular
   dependencies or invalid dependencies cannot be created.
 - Test against PostgreSQL 18 and Python 3.14.
+- The metrics plugin now tracks metrics on its own operations.
 
 🐛 Fixes
 
