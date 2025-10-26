@@ -5,7 +5,7 @@ from datetime import datetime
 from functools import partial
 from typing import List, Dict, TextIO, Self
 from psycopg import sql, AsyncCursor
-from psycopg.rows import dict_row
+from psycopg.rows import dict_row, DictRow
 
 from chancy.hub import Event
 from chancy.plugin import Plugin
@@ -14,6 +14,51 @@ from chancy.worker import Worker
 from chancy.job import Job, QueuedJob, IsAJob
 from chancy.utils import json_dumps, chancy_uuid
 from chancy.rule import Rule
+
+
+class CircularDependencyError(ValueError):
+    """Raised when a circular dependency is detected in a workflow."""
+
+    pass
+
+
+class InvalidDependencyError(ValueError):
+    """Raised when a dependency references a non-existent step."""
+
+    pass
+
+
+def _dfs_detect_cycle(
+    step_id: str,
+    steps: Dict[str, "WorkflowStep"],
+    color: Dict[str, int],
+    path: List[str],
+) -> None:
+    """
+    DFS helper to detect cycles in workflow dependency graph.
+
+    :param step_id: Current step being visited.
+    :param steps: Dictionary of all workflow steps.
+    :param color: Color mapping (0=WHITE/unvisited, 1=GRAY/in-stack, 2=BLACK/processed).
+    :param path: Current path in the recursion stack.
+    :raises CircularDependencyError: If a cycle is detected.
+    """
+    color[step_id] = 1  # Mark as GRAY (in recursion stack)
+    path.append(step_id)
+
+    for dep_id in steps[step_id].dependencies:
+        if color[dep_id] == 1:  # GRAY - cycle detected
+            # Find where the cycle starts
+            cycle_start = path.index(dep_id)
+            cycle_path = " -> ".join(path[cycle_start:] + [dep_id])
+            raise CircularDependencyError(
+                f"Circular dependency detected: {cycle_path}"
+            )
+        elif color[dep_id] == 0:  # WHITE - unvisited
+            _dfs_detect_cycle(dep_id, steps, color, path)
+
+    path.pop()
+    color[step_id] = 2  # Mark as BLACK (processed)
 
 
 @dataclass
@@ -128,6 +173,35 @@ class Workflow:
     @property
     def is_running(self) -> bool:
         return self.state == self.State.RUNNING
+
+    def validate(self) -> None:
+        """
+        Validate the workflow's dependency graph.
+
+        This method checks for:
+        - Circular dependencies (cycles in the dependency graph)
+        - Invalid dependencies (references to non-existent steps)
+
+        :raises CircularDependencyError: If a circular dependency is detected.
+        :raises InvalidDependencyError: If a dependency references a non-existent step.
+        """
+        # First, check that all dependencies reference existing steps
+        for step_id, step in self.steps.items():
+            for dep_id in step.dependencies:
+                if dep_id not in self.steps:
+                    raise InvalidDependencyError(
+                        f"Step '{step_id}' depends on non-existent step '{dep_id}'"
+                    )
+
+        # Detect cycles using DFS with three-color marking
+        # WHITE (0) = unvisited, GRAY (1) = in recursion stack, BLACK (2) = processed
+        color = {step_id: 0 for step_id in self.steps}
+        path: List[str] = []
+
+        # Run DFS from all unvisited nodes
+        for step_id in self.steps:
+            if color[step_id] == 0:
+                _dfs_detect_cycle(step_id, self.steps, color, path)
 
     @property
     def steps_by_state(self) -> Dict[QueuedJob.State, List[WorkflowStep]]:
@@ -404,7 +478,7 @@ class WorkflowPlugin(Plugin):
 
     @classmethod
     async def fetch_workflow_ex(
-        cls, cursor: AsyncCursor, chancy: Chancy, id_: str
+        cls, cursor: AsyncCursor[DictRow], chancy: Chancy, id_: str
     ) -> Workflow | None:
         """
         Fetch a single workflow from the database.
@@ -451,7 +525,7 @@ class WorkflowPlugin(Plugin):
 
     @staticmethod
     async def fetch_workflows_ex(
-        cursor: AsyncCursor,
+        cursor: AsyncCursor[DictRow],
         chancy: Chancy,
         *,
         states: list[str] | None = None,
@@ -624,7 +698,7 @@ class WorkflowPlugin(Plugin):
 
     @staticmethod
     async def push_ex(
-        cursor: AsyncCursor, chancy: Chancy, workflow: Workflow
+        cursor: AsyncCursor[DictRow], chancy: Chancy, workflow: Workflow
     ) -> str:
         """
         Push new workflow to the database.
@@ -639,7 +713,11 @@ class WorkflowPlugin(Plugin):
         :param chancy: The Chancy application.
         :param workflow: The workflow to push.
         :return: The UUID of the newly created workflow.
+        :raises CircularDependencyError: If a circular dependency is detected.
+        :raises InvalidDependencyError: If a dependency references a non-existent step.
         """
+        workflow.validate()
+
         await cursor.execute(
             sql.SQL(
                 """

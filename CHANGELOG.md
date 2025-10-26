@@ -8,6 +8,8 @@ Changelog
 
 - Ensure `fetch_workflows_ex` always has guaranteed deterministic ordering of
   the returned workflow steps.
+- Workflow's now validate before pushing, ensuring workflows with circular
+  dependencies or invalid dependencies cannot be created.
 
 🐛 Fixes
 
