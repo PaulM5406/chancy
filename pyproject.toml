@@ -1,6 +1,6 @@
 [project]
 name = "chancy"
-version = "0.25.0"
+version = "0.25.1"
 description = "A simple and flexible job queue for Python"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 [project.urls]
