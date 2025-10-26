@@ -6,6 +6,8 @@ Changelog
 
 ✨ Improvements
 
+- Added the Trigger plugin, which allows you to start jobs when arbitrary
+  database events occur, such as inserts, updates, or deletes.
 - Ensure `fetch_workflows_ex` always has guaranteed deterministic ordering of
   the returned workflow steps.
 - Workflow's now validate before pushing, ensuring workflows with circular

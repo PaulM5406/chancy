@@ -331,8 +331,9 @@ async def test_simple_circular_dependency(chancy: Chancy, worker):
     with pytest.raises(CircularDependencyError) as exc_info:
         await WorkflowPlugin.push(chancy, workflow)
 
-    assert "step_a -> step_b -> step_a" in str(exc_info.value) or \
-           "step_b -> step_a -> step_b" in str(exc_info.value)
+    assert "step_a -> step_b -> step_a" in str(
+        exc_info.value
+    ) or "step_b -> step_a -> step_b" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
