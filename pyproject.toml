@@ -55,6 +55,7 @@ dev = [
     "ghp-import>=2.1.0",
     "pytest-benchmark>=5.1.0",
     "pytest-django>=4.8.0",
+    "pre-commit>=4.3.0",
 ]
 
 [project.scripts]
