@@ -68,7 +68,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
         os: ["ubuntu-24.04", "macos-14", "windows-2022"]
-        pg: ["14", "15", "16", "17"]
+        pg: ["14", "15", "16", "17", "18"]
     env:
       OS: ${{ matrix.os }}
       PYTHON: ${{ matrix.python-version }}
@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4.1.6
 
-      - uses: ikalnytskyi/action-setup-postgres@v7
+      - uses: ikalnytskyi/action-setup-postgres@v8
         with:
           username: postgres
           password: localtest
