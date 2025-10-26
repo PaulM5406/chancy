@@ -345,7 +345,7 @@ class WorkflowPlugin(Plugin):
         progressed to the next step without waiting for the next polling
         interval.
         """
-        if not worker.is_leader:
+        if not worker.is_leader.is_set():
             return
 
         async with chancy.pool.connection() as conn:

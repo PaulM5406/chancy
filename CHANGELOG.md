@@ -1,6 +1,15 @@
 Changelog
 =========
 
+0.25.1
+------
+
+🐛 Fixes
+
+- Fix a workflow's on_single_step_completed potentially running after the
+  worker has lost leadership. Due to the workflow lock, this could not have
+  resulted in duplicate work.
+
 0.25.0
 ------
 
