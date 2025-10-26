@@ -68,7 +68,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.14"]
         os: ["ubuntu-24.04", "macos-14", "windows-2022"]
-        pg: ["14", 18"]
+        pg: ["14", "18"]
     env:
       OS: ${{ matrix.os }}
       PYTHON: ${{ matrix.python-version }}

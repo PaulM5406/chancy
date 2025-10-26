@@ -12,6 +12,7 @@ Changelog
   the returned workflow steps.
 - Workflow's now validate before pushing, ensuring workflows with circular
   dependencies or invalid dependencies cannot be created.
+- Test against PostgreSQL 18 and Python 3.14.
 
 🐛 Fixes
 
