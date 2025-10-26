@@ -10,5 +10,10 @@ export default defineConfig({
     // Since our dist directory is outside the vite root,
     // it doesn't empty by default.
     emptyOutDir: true,
+  },
+  server: {
+    proxy: {
+      '/api': 'http://localhost:8000'
+    }
   }
 })
