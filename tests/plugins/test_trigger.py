@@ -142,9 +142,9 @@ async def test_trigger_creates_job_on_change(
             )
 
             jobs = await cursor.fetchall()
-            assert (
-                len(jobs) == 0
-            ), "Trigger should not create jobs when disabled"
+            assert len(jobs) == 0, (
+                "Trigger should not create jobs when disabled"
+            )
 
 
 @pytest.mark.parametrize(
@@ -196,9 +196,9 @@ async def test_trigger_update_operation(chancy: Chancy, worker, test_table):
             )
 
             jobs = await cursor.fetchall()
-            assert (
-                len(jobs) == 1
-            ), "UPDATE trigger should create exactly one job"
+            assert len(jobs) == 1, (
+                "UPDATE trigger should create exactly one job"
+            )
 
             ref = Reference(jobs[0][0])
             j = await chancy.wait_for_job(ref)
@@ -253,9 +253,9 @@ async def test_trigger_delete_operation(chancy: Chancy, worker, test_table):
             )
 
             jobs = await cursor.fetchall()
-            assert (
-                len(jobs) == 1
-            ), "DELETE trigger should create exactly one job"
+            assert len(jobs) == 1, (
+                "DELETE trigger should create exactly one job"
+            )
 
             ref = Reference(jobs[0][0])
             j = await chancy.wait_for_job(ref)
@@ -321,9 +321,9 @@ async def test_trigger_multiple_operations(chancy: Chancy, worker, test_table):
             )
 
             jobs = await cursor.fetchall()
-            assert (
-                len(jobs) == 3
-            ), f"Should create 3 jobs (INSERT, UPDATE, DELETE), got {len(jobs)}"
+            assert len(jobs) == 3, (
+                f"Should create 3 jobs (INSERT, UPDATE, DELETE), got {len(jobs)}"
+            )
 
             # Wait for all jobs to complete
             for job_row in jobs:
@@ -612,9 +612,9 @@ async def test_trigger_bulk_operations(chancy: Chancy, worker, test_table):
 
             jobs = await cursor.fetchall()
             # Statement-level trigger should fire once per statement, not per row
-            assert (
-                len(jobs) == 1
-            ), "Statement-level trigger should create 1 job for bulk insert"
+            assert len(jobs) == 1, (
+                "Statement-level trigger should create 1 job for bulk insert"
+            )
 
 
 @pytest.mark.parametrize(
