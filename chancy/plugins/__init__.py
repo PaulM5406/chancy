@@ -45,5 +45,8 @@ and typically require additional dependencies:
   the priority of jobs based on how long they've been in the queue.
 - :class:`chancy.plugins.sentry.SentryPlugin`: This plugin sends job exceptions
   to Sentry, along with metadata about the job and worker.
+- :class:`chancy.plugins.trigger.Trigger`: This plugin allows jobs to be queued
+  based on database triggers, such as rows being inserted/deleted/updated to a
+  table.
 
 """

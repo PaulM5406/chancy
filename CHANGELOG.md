@@ -1,6 +1,31 @@
 Changelog
 =========
 
+0.25.1
+------
+
+✨ Improvements
+
+- Added the Trigger plugin, which allows you to start jobs when arbitrary
+  database events occur, such as inserts, updates, or deletes.
+- Ensure `fetch_workflows_ex` always has guaranteed deterministic ordering of
+  the returned workflow steps.
+- Workflow's now validate before pushing, ensuring workflows with circular
+  dependencies or invalid dependencies cannot be created.
+- Test against PostgreSQL 18 and Python 3.14.
+- The metrics plugin now tracks metrics on its own operations.
+- Added `Chancy.purge_jobs()` and `Chancy.retry_jobs()` to bulk purge or
+  retry specific jobs by reference.
+- Added `_ex` versions of `purge_jobs`, `retry_jobs`, `pause_queue`,
+  `resume_queue`, `delete_queue`, and `cancel_job` to allow passing in a
+  cursor for transactional operations.
+
+🐛 Fixes
+
+- Fix a workflow's on_single_step_completed potentially running after the
+  worker has lost leadership. Due to the workflow lock, this could not have
+  resulted in duplicate work.
+
 0.25.0
 ------
 

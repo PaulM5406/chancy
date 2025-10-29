@@ -1,6 +1,6 @@
 [project]
 name = "chancy"
-version = "0.25.0"
+version = "0.25.1"
 description = "A simple and flexible job queue for Python"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 [project.urls]
@@ -42,11 +43,8 @@ django = [
     "django>=4.0.0",
 ]
 
-[project.scripts]
-chancy = "chancy.cli.cli:main"
-
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest-asyncio>=0.24.0",
     "pytest>=8.2.0",
     "sphinx>=7.3.7",
@@ -57,7 +55,12 @@ dev-dependencies = [
     "ghp-import>=2.1.0",
     "pytest-benchmark>=5.1.0",
     "pytest-django>=4.8.0",
+    "pre-commit>=4.3.0",
+    "ruff>=0.14.2",
 ]
+
+[project.scripts]
+chancy = "chancy.cli.cli:main"
 
 [tool.hatch.build.targets.wheel]
 artifacts = [

@@ -266,3 +266,52 @@ async def test_job_ordering(chancy: Chancy, worker: Worker):
     by_uuid7 = sorted(completed, key=lambda x: x.id)
 
     assert by_completed_at == by_uuid7
+
+
+@pytest.mark.asyncio
+async def test_retry_jobs(chancy: Chancy, worker: Worker):
+    """
+    Ensure that retrying a failed job requeues it and executes again.
+    """
+    await chancy.declare(Queue("default"))
+
+    ref = await chancy.push(Job.from_func(job_that_fails, max_attempts=1))
+    j1 = await chancy.wait_for_job(ref, timeout=30)
+    assert j1 is not None
+    assert j1.state == QueuedJob.State.FAILED
+
+    errors_before = len(j1.errors)
+
+    # Retry the job and ensure it runs again (and fails again).
+    await chancy.retry_jobs([ref])
+
+    j2 = await chancy.wait_for_job(ref, timeout=30)
+    assert j2 is not None
+    assert j2.state == QueuedJob.State.FAILED
+    # Attempts are reset on retry and incremented by the next run.
+    assert j2.attempts == 1
+    # We preserve error history; another attempt should add a new error.
+    assert len(j2.errors) >= errors_before + 1
+
+
+@pytest.mark.asyncio
+async def test_purge_jobs(chancy: Chancy, worker: Worker, sync_executor: str):
+    """
+    Ensure that purging jobs removes them permanently.
+    """
+    # Create a succeeded job
+    await chancy.declare(Queue("low", executor=sync_executor))
+    ref_ok = await chancy.push(job_to_run.job.with_queue("low"))
+    j_ok = await chancy.wait_for_job(ref_ok, timeout=30)
+    assert j_ok is not None and j_ok.state == QueuedJob.State.SUCCEEDED
+
+    # Create a failed job
+    await chancy.declare(Queue("default"))
+    ref_fail = await chancy.push(Job.from_func(job_that_fails, max_attempts=1))
+    j_fail = await chancy.wait_for_job(ref_fail, timeout=30)
+    assert j_fail is not None and j_fail.state == QueuedJob.State.FAILED
+
+    # Purge both and ensure they're gone
+    await chancy.purge_jobs([ref_ok, ref_fail])
+    assert await chancy.get_job(ref_ok) is None
+    assert await chancy.get_job(ref_fail) is None

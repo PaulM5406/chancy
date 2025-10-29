@@ -888,6 +888,7 @@ class Chancy:
                     raise KeyError(f"Queue {name!r} not found.")
                 return Queue.unpack(record)
 
+    @_ensure_pool_is_open
     async def delete_queue(self, name: str, *, purge_jobs: bool = True):
         """
         Delete a queue by name.
@@ -902,26 +903,9 @@ class Chancy:
         """
         async with self.pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cursor:
-                await cursor.execute(
-                    sql.SQL(
-                        """
-                        DELETE FROM {queues}
-                        WHERE name = %s
-                        """
-                    ).format(queues=sql.Identifier(f"{self.prefix}queues")),
-                    [name],
-                )
-                if purge_jobs:
-                    await cursor.execute(
-                        sql.SQL(
-                            """
-                            DELETE FROM {jobs}
-                            WHERE queue = %s
-                            """
-                        ).format(jobs=sql.Identifier(f"{self.prefix}jobs")),
-                        [name],
-                    )
+                await self.delete_queue_ex(cursor, name, purge_jobs=purge_jobs)
 
+    @_ensure_pool_is_open
     async def pause_queue(
         self,
         name: str,
@@ -944,24 +928,16 @@ class Chancy:
         """
         async with self.pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cursor:
+                # Normalize timedelta to absolute datetime if needed
                 if isinstance(resume_at, datetime.timedelta):
                     resume_at = (
                         datetime.datetime.now(tz=datetime.timezone.utc)
                         + resume_at
                     )
-
-                await cursor.execute(
-                    sql.SQL(
-                        """
-                        UPDATE {queues}
-                        SET state = 'paused', resume_at = %(resume_at)s
-                        WHERE name = %(name)s
-                        """
-                    ).format(queues=sql.Identifier(f"{self.prefix}queues")),
-                    {"name": name, "resume_at": resume_at},
-                )
+                await self.pause_queue_ex(cursor, name, resume_at=resume_at)
                 await self.notify(cursor, "queue.paused", {"q": name})
 
+    @_ensure_pool_is_open
     async def resume_queue(self, name: str):
         """
         Resume a queue by name.
@@ -976,19 +952,120 @@ class Chancy:
         """
         async with self.pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cursor:
-                await cursor.execute(
-                    sql.SQL(
-                        """
-                        UPDATE {queues}
-                        SET
-                            state = 'active',
-                            resume_at = NULL
-                        WHERE name = %(name)s
-                        """
-                    ).format(queues=sql.Identifier(f"{self.prefix}queues")),
-                    {"name": name},
-                )
+                await self.resume_queue_ex(cursor, name)
                 await self.notify(cursor, "queue.resumed", {"q": name})
+
+    async def delete_queue_ex(
+        self,
+        cursor: AsyncCursor[DictRow],
+        name: str,
+        *,
+        purge_jobs: bool = True,
+    ) -> int:
+        """
+        Delete a queue by name using an existing cursor.
+
+        See :meth:`delete_queue` for more information.
+
+        .. seealso::
+
+            :meth:`delete_queue` for a helper that manages the connection and
+            transaction.
+
+        :param cursor: The cursor to use for the operation. Must use a
+            dict_row row factory.
+        :param name: The name of the queue to delete.
+        :param purge_jobs: If ``True``, delete all jobs in the queue as well.
+        :return: The number of queues deleted (0 or 1).
+        """
+        await cursor.execute(
+            sql.SQL(
+                """
+                DELETE FROM {queues}
+                WHERE name = %s
+                """
+            ).format(queues=sql.Identifier(f"{self.prefix}queues")),
+            [name],
+        )
+        if purge_jobs:
+            await cursor.execute(
+                sql.SQL(
+                    """
+                    DELETE FROM {jobs}
+                    WHERE queue = %s
+                    """
+                ).format(jobs=sql.Identifier(f"{self.prefix}jobs")),
+                [name],
+            )
+        return cursor.rowcount or 0
+
+    async def pause_queue_ex(
+        self,
+        cursor: AsyncCursor[DictRow],
+        name: str,
+        *,
+        resume_at: datetime.datetime | None = None,
+    ) -> int:
+        """
+        Pause a queue by name using an existing cursor.
+
+        See :meth:`pause_queue` for more information.
+
+        .. seealso::
+
+            :meth:`pause_queue` for a helper that manages the connection and
+            emits notifications.
+
+        :param cursor: The cursor to use for the operation. Must use a
+            dict_row row factory.
+        :param name: The name of the queue to pause.
+        :param resume_at: An absolute datetime when the queue should
+            automatically resume, or ``None`` to require manual resume.
+        :return: The number of rows updated.
+        """
+        await cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {queues}
+                SET state = 'paused', resume_at = %(resume_at)s
+                WHERE name = %(name)s
+                """
+            ).format(queues=sql.Identifier(f"{self.prefix}queues")),
+            {"name": name, "resume_at": resume_at},
+        )
+        return cursor.rowcount or 0
+
+    async def resume_queue_ex(
+        self, cursor: AsyncCursor[DictRow], name: str
+    ) -> int:
+        """
+        Resume a queue by name using an existing cursor.
+
+        See :meth:`resume_queue` for more information.
+
+        .. seealso::
+
+            :meth:`resume_queue` for a helper that manages the connection and
+            emits notifications.
+
+        :param cursor: The cursor to use for the operation. Must use a
+            dict_row row factory.
+        :param name: The name of the queue to resume.
+        :return: The number of rows updated.
+        """
+        await cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {queues}
+                SET
+                    state = 'active',
+                    resume_at = NULL
+                WHERE name = %(name)s
+                """
+            ).format(queues=sql.Identifier(f"{self.prefix}queues")),
+            {"name": name},
+        )
+        return cursor.rowcount or 0
 
     @_ensure_pool_is_open
     async def get_all_workers(self) -> list[dict[str, Any]]:
@@ -1060,22 +1137,43 @@ class Chancy:
         async with self.pool.connection() as conn:
             async with conn.cursor(row_factory=dict_row) as cursor:
                 async with conn.transaction():
-                    await cursor.execute(
-                        sql.SQL(
-                            """
-                            UPDATE {jobs}
-                            SET state = 'failed'
-                            WHERE id = %s
-                            """
-                        ).format(jobs=sql.Identifier(f"{self.prefix}jobs")),
-                        [ref.identifier],
-                    )
+                    await self.cancel_job_ex(cursor, ref)
 
                     # Tell any workers that might have already snagged the job
                     # to cancel it.
                     await self.notify(
                         cursor, "job.cancelled", {"j": ref.identifier}
                     )
+
+    async def cancel_job_ex(
+        self, cursor: AsyncCursor[DictRow], ref: Reference
+    ) -> int:
+        """
+        Cancel a job by reference using an existing cursor.
+
+        See :meth:`cancel_job` for more information.
+
+        .. seealso::
+
+            :meth:`cancel_job` for a helper that manages the connection,
+            transaction, and emits notifications.
+
+        :param cursor: The cursor to use for the operation. Must use a
+            dict_row row factory.
+        :param ref: The reference to the job to cancel.
+        :return: The number of rows updated (0 or 1).
+        """
+        await cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {jobs}
+                SET state = 'failed'
+                WHERE id = %s
+                """
+            ).format(jobs=sql.Identifier(f"{self.prefix}jobs")),
+            [ref.identifier],
+        )
+        return cursor.rowcount or 0
 
     def _get_all_workers_sql(self):
         return sql.SQL(
@@ -1092,6 +1190,124 @@ class Chancy:
             workers=sql.Identifier(f"{self.prefix}workers"),
             leader=sql.Identifier(f"{self.prefix}leader"),
         )
+
+    @_ensure_pool_is_open
+    async def retry_jobs(self, refs: list[Reference]):
+        """
+        Retry one or more jobs by reference.
+
+        This will make the referenced jobs eligible to be picked up again by
+        workers by resetting transient execution fields and scheduling them
+        immediately. Attempts are reset to 0 to permit re-execution even if the
+        job had reached ``max_attempts``. Error history is preserved.
+
+        Jobs currently in the ``running`` state are ignored.
+
+        :param refs: The references to the jobs to retry.
+        """
+        if not refs:
+            return
+
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cursor:
+                async with conn.transaction():
+                    queues = await self.retry_jobs_ex(cursor, refs)
+                    if self.notifications and queues:
+                        for q in queues:
+                            await self.notify(cursor, "queue.pushed", {"q": q})
+
+    @_ensure_pool_is_open
+    async def purge_jobs(self, refs: list[Reference]):
+        """
+        Permanently remove one or more jobs by reference.
+
+        This will delete the job rows from the database. Use with care. It will
+        not handle cancellation of running jobs; use :meth:`cancel_job` for
+        that.
+
+        :param refs: The references to the jobs to purge.
+        """
+        if not refs:
+            return
+
+        async with self.pool.connection() as conn:
+            async with conn.cursor(row_factory=dict_row) as cursor:
+                await self.purge_jobs_ex(cursor, refs)
+
+    async def retry_jobs_ex(
+        self, cursor: AsyncCursor[DictRow], refs: list[Reference]
+    ) -> set[str]:
+        """
+        Retry one or more jobs by reference using an existing cursor.
+
+        See :meth:`retry_jobs` for more information.
+
+        .. seealso::
+
+            :meth:`retry_jobs` for a helper that manages the connection and
+            emits notifications.
+
+        :param cursor: The cursor to use for the operation. Must use a
+            dict_row row factory.
+        :param refs: The references to the jobs to retry.
+        :return: The set of affected queue names to assist callers in
+            emitting notifications.
+        """
+        if not refs:
+            return set()
+
+        await cursor.execute(
+            sql.SQL(
+                """
+                UPDATE {jobs} AS j
+                SET
+                    started_at = NULL,
+                    completed_at = NULL,
+                    taken_by = NULL,
+                    scheduled_at = NOW(),
+                    state = 'retrying',
+                    attempts = 0
+                WHERE j.id = ANY(%(ids)s)
+                  AND j.state != 'running'
+                RETURNING j.queue
+                """
+            ).format(jobs=sql.Identifier(f"{self.prefix}jobs")),
+            {"ids": [ref.identifier for ref in refs]},
+        )
+        rows = await cursor.fetchall()
+        return {row["queue"] for row in rows}
+
+    async def purge_jobs_ex(
+        self, cursor: AsyncCursor[DictRow], refs: list[Reference]
+    ) -> int:
+        """
+        Permanently remove one or more jobs by reference using an existing
+        cursor.
+
+        See :meth:`purge_jobs` for more information.
+
+        .. seealso::
+
+            :meth:`purge_jobs` for a helper that manages the connection.
+
+        :param cursor: The cursor to use for the operation. Must use a
+            dict_row row factory.
+        :param refs: The references to the jobs to purge.
+        :return: The number of rows deleted.
+        """
+        if not refs:
+            return 0
+
+        await cursor.execute(
+            sql.SQL(
+                """
+                DELETE FROM {jobs}
+                WHERE id = ANY(%(ids)s)
+                """
+            ).format(jobs=sql.Identifier(f"{self.prefix}jobs")),
+            {"ids": [ref.identifier for ref in refs]},
+        )
+        return cursor.rowcount or 0
 
     def _get_queue_sql(self):
         return sql.SQL(

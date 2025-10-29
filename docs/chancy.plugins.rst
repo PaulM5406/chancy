@@ -12,13 +12,14 @@ Submodules
 .. toctree::
    :maxdepth: 4
 
+   chancy.plugins.api
+   chancy.plugins.cron
    chancy.plugins.leadership
+   chancy.plugins.metrics
    chancy.plugins.pruner
    chancy.plugins.recovery
-   chancy.plugins.cron
-   chancy.plugins.api
-   chancy.plugins.workflow
-   chancy.plugins.retry
    chancy.plugins.reprioritize
+   chancy.plugins.retry
    chancy.plugins.sentry
-   chancy.plugins.metrics
+   chancy.plugins.trigger
+   chancy.plugins.workflow

@@ -17,6 +17,7 @@ from chancy.app import Chancy
 from chancy.job import QueuedJob
 from chancy.plugin import Plugin
 from chancy.worker import Worker
+from chancy.utils import timed_block
 
 Resolution = Literal["1min", "5min", "1hour", "1day"]
 MetricValue = Union[int, float, Dict[str, Union[int, float]]]
@@ -131,6 +132,8 @@ class Metrics(Plugin):
 
         # Track metrics that have been modified locally since last sync.
         self.modified_metrics: Set[str] = set()
+        # Protect access to modified_metrics to avoid races with sync.
+        self.modified_lock: asyncio.Lock = asyncio.Lock()
 
         # Last sync timestamp.
         self.last_sync_time = datetime.datetime.now(datetime.timezone.utc)
@@ -272,7 +275,8 @@ class Metrics(Plugin):
                 if len(points) > self.max_points[resolution]:
                     points.pop()
 
-                self.modified_metrics.add(metric_key)
+                async with self.modified_lock:
+                    self.modified_metrics.add(metric_key)
 
     async def record_gauge(
         self, metric_key: str, value: Union[int, float]
@@ -317,7 +321,8 @@ class Metrics(Plugin):
                 if len(points) > self.max_points[resolution]:
                     points.pop()
 
-                self.modified_metrics.add(metric_key)
+                async with self.modified_lock:
+                    self.modified_metrics.add(metric_key)
 
     async def record_histogram_value(
         self, metric_key: str, value: Union[int, float]
@@ -392,38 +397,90 @@ class Metrics(Plugin):
                 if len(points) > self.max_points[resolution]:
                     points.pop()
 
-                self.modified_metrics.add(metric_key)
+                async with self.modified_lock:
+                    self.modified_metrics.add(metric_key)
 
     async def _sync_metrics(self, chancy: Chancy) -> None:
         """
         Synchronize metrics with the database and other workers.
+        Records health metrics and avoids dropping updates occurring during sync.
         """
-        if self.modified_metrics:
-            await self._push_metrics_to_db(chancy)
+        # Snapshot the modified set up-front to prevent losing updates recorded
+        # during this method.
+        async with self.modified_lock:
+            to_push = set(self.modified_metrics)
+            self.modified_metrics.clear()
 
-        self.aggregated_metrics_cache.update(
-            await self._get_raw_metrics(chancy)
+        with timed_block() as t_sync:
+            if to_push:
+                try:
+                    await self._push_metrics_to_db(chancy, metric_keys=to_push)
+                except Exception:
+                    await self.increment_counter("metrics:sync_errors", 1)
+                    raise
+
+            with timed_block() as t_pull:
+                try:
+                    aggregated = await self._get_raw_metrics(chancy)
+                except Exception:
+                    await self.increment_counter("metrics:sync_errors", 1)
+                    raise
+
+            self.aggregated_metrics_cache.update(aggregated)
+            self.last_sync_time = datetime.datetime.now(datetime.timezone.utc)
+
+        await self.increment_counter("metrics:sync_count", 1)
+        await self.record_histogram_value(
+            "metrics:sync_duration_s", t_sync.elapsed
         )
-        self.last_sync_time = datetime.datetime.now(datetime.timezone.utc)
-        self.modified_metrics.clear()
+        await self.record_histogram_value(
+            "metrics:db_pull_duration_s", t_pull.elapsed
+        )
+        await self.record_gauge(
+            "metrics:local_cache_size", len(self.local_metrics_cache)
+        )
+        await self.record_gauge(
+            "metrics:aggregated_cache_size",
+            len(self.aggregated_metrics_cache),
+        )
+        await self.record_gauge(
+            "metrics:last_sync_s", self.last_sync_time.timestamp()
+        )
 
-    async def _push_metrics_to_db(self, chancy: Chancy) -> None:
+        async with self.modified_lock:
+            to_push_health = set(self.modified_metrics)
+            self.modified_metrics.clear()
+        if to_push_health:
+            try:
+                await self._push_metrics_to_db(
+                    chancy, metric_keys=to_push_health
+                )
+            except Exception:
+                await self.increment_counter("metrics:sync_errors", 1)
+                raise
+
+    async def _push_metrics_to_db(
+        self, chancy: Chancy, *, metric_keys: Set[str] | None = None
+    ) -> None:
         """
         Push modified metrics to the database.
 
         Only pushes metrics from the local_metrics_cache, not the aggregated
         cache.
         """
-        if not self.modified_metrics:
+        metric_keys = metric_keys or self.modified_metrics
+        if not metric_keys:
             return
 
         metrics_to_insert = []
 
-        for metric_key in self.modified_metrics:
+        for metric_key in metric_keys:
             if metric_key not in self.local_metrics_cache:
                 continue
 
-            metric = self.local_metrics_cache[metric_key]
+            # Copy points under the per-metric lock to avoid races with writers.
+            async with await self._get_metric_lock(metric_key):
+                metric = self.local_metrics_cache[metric_key]
 
             for resolution in self.max_points.keys():
                 if resolution == "1min":
@@ -595,38 +652,47 @@ class Metrics(Plugin):
                 f"{chancy.prefix}{table}" for table in all_tables
             ]
 
-            async with chancy.pool.connection() as conn:
-                async with conn.cursor(row_factory=dict_row) as cursor:
-                    query = sql.SQL(
-                        """
-                        SELECT
-                            table_name,
-                            pg_total_relation_size(table_name) as total_size_bytes,
-                            pg_relation_size(table_name) as table_size_bytes,
-                            pg_indexes_size(table_name) as index_size_bytes
-                        FROM unnest({tables}::text[]) AS table_name
-                    """
-                    ).format(tables=sql.Literal(prefixed_tables))
+            with timed_block() as t_sizes:
+                try:
+                    async with chancy.pool.connection() as conn:
+                        async with conn.cursor(row_factory=dict_row) as cursor:
+                            query = sql.SQL(
+                                """
+                                SELECT
+                                    table_name,
+                                    pg_total_relation_size(table_name) as total_size_bytes,
+                                    pg_relation_size(table_name) as table_size_bytes,
+                                    pg_indexes_size(table_name) as index_size_bytes
+                                FROM unnest({tables}::text[]) AS table_name
+                                """
+                            ).format(tables=sql.Literal(prefixed_tables))
 
-                    await cursor.execute(query)
+                            await cursor.execute(query)
 
-                    async for result in cursor:
-                        table_name = result["table_name"].removeprefix(
-                            chancy.prefix
-                        )
+                            async for result in cursor:
+                                table_name = result["table_name"].removeprefix(
+                                    chancy.prefix
+                                )
 
-                        await self.record_histogram_value(
-                            f"table:{table_name}:total_size_bytes",
-                            result["total_size_bytes"],
-                        )
-                        await self.record_histogram_value(
-                            f"table:{table_name}:table_size_bytes",
-                            result["table_size_bytes"],
-                        )
-                        await self.record_histogram_value(
-                            f"table:{table_name}:index_size_bytes",
-                            result["index_size_bytes"],
-                        )
+                                await self.record_histogram_value(
+                                    f"table:{table_name}:total_size_bytes",
+                                    result["total_size_bytes"],
+                                )
+                                await self.record_histogram_value(
+                                    f"table:{table_name}:table_size_bytes",
+                                    result["table_size_bytes"],
+                                )
+                                await self.record_histogram_value(
+                                    f"table:{table_name}:index_size_bytes",
+                                    result["index_size_bytes"],
+                                )
+                except Exception:
+                    await self.increment_counter("metrics:table_size_errors", 1)
+                finally:
+                    await self.increment_counter("metrics:table_size_runs", 1)
+                    await self.record_histogram_value(
+                        "metrics:table_size_duration_s", t_sizes.elapsed
+                    )
 
     async def _get_raw_metrics(
         self,
