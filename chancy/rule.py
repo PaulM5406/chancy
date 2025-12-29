@@ -4,6 +4,7 @@ conditions of a Plugin.
 """
 
 from typing import Any
+
 from psycopg import sql
 
 
@@ -169,7 +170,10 @@ class ConcurrencyRules:
 
         def to_sql(self, context: dict = {}) -> sql.Composable:
             return sql.SQL(
-                "NOT EXISTS (SELECT 1 FROM {jobs_table} j WHERE j.concurrency_key = concurrency_key)"
+                "NOT EXISTS (SELECT 1 FROM {jobs_table} j WHERE j.concurrency_key = {concurrency_configs}.concurrency_key)"
             ).format(
-                jobs_table=sql.Identifier(f"{context['chancy_prefix']}jobs")
+                jobs_table=sql.Identifier(f"{context['chancy_prefix']}jobs"),
+                concurrency_configs=sql.Identifier(
+                    f"{context['chancy_prefix']}concurrency_configs"
+                ),
             )
