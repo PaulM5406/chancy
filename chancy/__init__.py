@@ -7,7 +7,7 @@ __all__ = (
     "Limit",
     "Reference",
     "job",
-    "ConcurrencyRule"
+    "ConcurrencyRule",
 )
 
 from chancy.app import Chancy
