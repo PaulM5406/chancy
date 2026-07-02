@@ -229,27 +229,29 @@ class ProcessExecutor(ConcurrentExecutor):
     def _on_job_completed(
         self, future: Future, loop: asyncio.AbstractEventLoop
     ):
-        job = self.jobs.pop(future)
+        job = self.jobs[future]
 
         timeout_task = self.timeouts.pop(job.id, None)
         if timeout_task is not None:
             timeout_task.cancel()
 
-        result = None
-        exc = future.exception()
-        if exc is None:
-            job, result = future.result()
-
-        asyncio.run_coroutine_threadsafe(
-            self.on_job_completed(job=job, exc=exc, result=result),
-            loop,
-        )
+        super()._on_job_completed(future, loop)
 
     async def stop(self):
         for task in self.timeouts.values():
             task.cancel()
 
-        self.pool.shutdown(cancel_futures=True)
+        # Interrupt any stragglers (same mechanism as cancel()), then shut
+        # down with wait=False so a job that ignores the signal can't
+        # block the event loop.
+        if hasattr(signal, "SIGUSR1"):
+            for pid in list(self.pids_for_job.values()):
+                try:
+                    os.kill(pid, signal.SIGUSR1)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+        self.pool.shutdown(wait=False, cancel_futures=True)
         self.manager.shutdown()
 
     async def cancel(self, ref: Reference):

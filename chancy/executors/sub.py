@@ -142,23 +142,10 @@ class SubInterpreterExecutor(ConcurrentExecutor):
     def _timeout_handler():
         raise TimeoutError("Job timed out.")
 
-    def _on_job_completed(
-        self, future: Future, loop: asyncio.AbstractEventLoop
-    ):
-        job = self.jobs.pop(future)
-
-        result = None
-        exc = future.exception()
-        if exc is None:
-            job, result = future.result()
-
-        asyncio.run_coroutine_threadsafe(
-            self.on_job_completed(job=job, exc=exc, result=result),
-            loop,
-        )
-
     async def stop(self):
-        self.pool.shutdown(cancel_futures=True)
+        # wait=False since running interpreters can't be interrupted and
+        # shouldn't block the event loop.
+        self.pool.shutdown(wait=False, cancel_futures=True)
         await super().stop()
 
     def get_default_concurrency(self) -> int:
