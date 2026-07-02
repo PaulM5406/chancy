@@ -75,6 +75,9 @@ class AsyncExecutor(Executor):
                 task.cancel()
                 return
 
+    def _drain_awaitables(self) -> list:
+        return list(self.jobs.keys())
+
     async def stop(self):
         """
         Stop the executor, giving it a chance to clean up any resources it
@@ -82,7 +85,7 @@ class AsyncExecutor(Executor):
         """
         for task in self.jobs:
             task.cancel()
-        await asyncio.gather(*self.jobs)
+        await asyncio.gather(*self.jobs, return_exceptions=True)
 
     def get_default_concurrency(self):
         """

@@ -1,4 +1,5 @@
 import abc
+import asyncio
 import inspect
 import typing
 import traceback
@@ -55,7 +56,7 @@ class Executor(abc.ABC):
         self,
         *,
         job: QueuedJob,
-        exc: Exception | None = None,
+        exc: BaseException | None = None,
         result: Any = None,
     ):
         """
@@ -176,6 +177,35 @@ class Executor(abc.ABC):
         called.
         """
 
+    def _drain_awaitables(self) -> list:
+        """
+        Awaitables that resolve as in-flight jobs complete, used by
+        :meth:`_drain`. An empty list falls back to polling.
+        """
+        return []
+
+    async def _drain(self, timeout: float) -> None:
+        """
+        Wait up to ``timeout`` seconds for in-flight jobs to finish,
+        without cancelling them. Re-checks for jobs that arrive after the
+        wait began, such as a fetch that was already in flight when the
+        shutdown started.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while len(self) > 0:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            awaitables = self._drain_awaitables()
+            if awaitables:
+                await asyncio.wait(awaitables, timeout=remaining)
+            if len(self) > 0:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return
+                await asyncio.sleep(min(0.05, remaining))
+
     @abc.abstractmethod
     async def cancel(self, ref: Reference):
         """
@@ -243,6 +273,53 @@ class ConcurrentExecutor(Executor, ABC):
             if job.id == ref.identifier:
                 future.cancel()
                 return
+
+    def _drain_awaitables(self) -> list:
+        return [asyncio.wrap_future(f) for f in self.jobs]
+
+    def _on_job_completed(
+        self, future: Future, loop: asyncio.AbstractEventLoop
+    ):
+        """
+        Called from a pool callback thread when a future finishes,
+        including one cancelled before it ever started running.
+
+        The job is only removed from :attr:`jobs` once its state update
+        has been queued, so ``len(self)`` reflects jobs whose completion
+        hasn't been recorded yet.
+        """
+        job = self.jobs[future]
+
+        result = None
+        if future.cancelled():
+            exc: BaseException | None = asyncio.CancelledError(
+                "Job was cancelled before it could complete."
+            )
+        else:
+            exc = future.exception()
+            if exc is None:
+                job, result = future.result()
+
+        coro = self._complete(future, job, exc, result)
+        try:
+            asyncio.run_coroutine_threadsafe(coro, loop)
+        except RuntimeError:
+            # The event loop is already closed, the job will be picked
+            # up by recovery.
+            coro.close()
+            self.jobs.pop(future, None)
+
+    async def _complete(
+        self,
+        future: Future,
+        job: QueuedJob,
+        exc: BaseException | None,
+        result: Any,
+    ):
+        try:
+            await self.on_job_completed(job=job, exc=exc, result=result)
+        finally:
+            self.jobs.pop(future, None)
 
     def __len__(self):
         return len(self.jobs)
